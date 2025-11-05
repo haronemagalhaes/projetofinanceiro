@@ -179,7 +179,7 @@ export default function LoginPage() {
             (somente e-mail autorizado).
           </p>
           <p className="opacity-70">
-            E-mail permitido: {allowed ? <code>{allowed}</code> : '— (não definido em .env)'}
+            E-mail permitido: {allowed ? <code>{allowed}</code> : ''}
           </p>
         </div>
       </div>
