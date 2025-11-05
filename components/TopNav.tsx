@@ -3,19 +3,24 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   LayoutGrid, TrendingUp, Briefcase, CreditCard, Repeat,
-  PiggyBank, LineChart, Moon, Sun
+  PiggyBank, LineChart, Moon, Sun, LogOut
 } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { auth } from '@/lib/firebaseConfig';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { Button } from '@/components/ui/button';
 
 type Item = { id: string; label: string; icon: React.ComponentType<any>; aliasOf?: string };
 
 export default function TopNav() {
-  // Nova sequência com "Gastos Fixos" no lugar de "Despesas"
+  // Menu (mantendo seus itens e aliases)
   const items: Item[] = useMemo(() => ([
     { id: 'dashboard', label: 'Dashboard', icon: LayoutGrid },
     { id: 'renda-fixa', label: 'Renda', icon: TrendingUp, aliasOf: 'renda-fixa' },
     { id: 'freelancer', label: 'Freelancer', icon: Briefcase },
     { id: 'cartoes', label: 'Cartões', icon: CreditCard },
     { id: 'renda-fixa-dup', label: 'Renda Fixa', icon: Repeat, aliasOf: 'renda-fixa' },
+    // Se quer que "Poupança" aponte para gastos-fixos, mantém alias; caso tenha seção própria, troque para aliasOf: 'poupanca'
     { id: 'poupanca', label: 'Poupança', icon: PiggyBank, aliasOf: 'gastos-fixos' },
     { id: 'gastos-fixos', label: 'Gastos Fixos', icon: LineChart },
   ]), []);
@@ -26,6 +31,15 @@ export default function TopNav() {
       ? document.documentElement.classList.contains('dark')
       : false
   );
+
+  // Usuário logado (para exibir e-mail e permitir sair)
+  const [email, setEmail] = useState<string | null>(null);
+  const router = useRouter();
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (u) => setEmail(u?.email ?? null));
+    return () => unsub();
+  }, []);
 
   // Observa as seções para destacar o ativo
   useEffect(() => {
@@ -49,12 +63,11 @@ export default function TopNav() {
   }, []);
 
   const scrollTo = (targetId: string) => {
-    const id =
+    const realId =
       targetId === 'renda-fixa-dup' ? 'renda-fixa'
-      : targetId === 'poupanca' ? 'gastos-fixos'
       : (items.find(i => i.id === targetId)?.aliasOf ?? targetId);
 
-    const el = document.getElementById(id);
+    const el = document.getElementById(realId);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
@@ -64,6 +77,13 @@ export default function TopNav() {
     setDark(next);
     root.classList.toggle('dark', next);
     try { localStorage.setItem('theme', next ? 'dark' : 'light'); } catch {}
+  };
+
+  // Sair: encerra sessão, limpa cookie do middleware e vai pro /login
+  const handleSignOut = async () => {
+    try { await signOut(auth); } catch {}
+    document.cookie = 'auth=; Path=/; Max-Age=0; SameSite=Lax';
+    router.replace('/login');
   };
 
   useEffect(() => {
@@ -86,14 +106,28 @@ export default function TopNav() {
           <p className="text-sm text-zinc-500 dark:text-zinc-400 -mt-0.5">
             Gerencie suas finanças de forma inteligente
           </p>
+          {email && (
+            <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+              Logado como: <span className="font-mono">{email}</span>
+            </p>
+          )}
         </div>
-        <button
-          onClick={toggleTheme}
-          className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-white text-zinc-700 shadow ring-1 ring-zinc-200 hover:bg-zinc-50 dark:bg-zinc-900 dark:text-zinc-200 dark:ring-zinc-700"
-          aria-label="Alternar tema"
-        >
-          {dark ? <Sun size={18} /> : <Moon size={18} />}
-        </button>
+
+        <div className="flex items-center gap-2">
+          <button
+            onClick={toggleTheme}
+            className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-white text-zinc-700 shadow ring-1 ring-zinc-200 hover:bg-zinc-50 dark:bg-zinc-900 dark:text-zinc-200 dark:ring-zinc-700"
+            aria-label="Alternar tema"
+            title="Alternar tema"
+          >
+            {dark ? <Sun size={18} /> : <Moon size={18} />}
+          </button>
+
+          <Button variant="outline" onClick={handleSignOut} className="gap-2">
+            <LogOut size={16} />
+            Sair
+          </Button>
+        </div>
       </div>
 
       {/* Menu principal */}

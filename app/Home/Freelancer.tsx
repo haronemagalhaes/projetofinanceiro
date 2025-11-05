@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, startTransition } from 'react';
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from '@/components/ui/card';
@@ -13,20 +13,34 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
-  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger,
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
 import {
   Plus, Briefcase, Clock, CheckCircle, AlertCircle, Trash2, ReceiptText, Wallet,
 } from 'lucide-react';
 
 // Firebase
-import app from '@/lib/firebaseConfig';
+import { db, auth } from '@/lib/firebaseConfig';
 import {
-  getFirestore, collection, addDoc, deleteDoc, doc, onSnapshot,
-  query, where, orderBy, serverTimestamp, getDocs,
+  collection,
+  addDoc,
+  deleteDoc,
+  doc,
+  onSnapshot,
+  query,
+  where,
+  orderBy,
+  serverTimestamp,
+  getDocs,
+  FirestoreDataConverter,
+  Query,
+  DocumentData,
+  updateDoc, // << ADICIONADO
 } from 'firebase/firestore';
-import { getAuth, onAuthStateChanged, signInAnonymously } from 'firebase/auth';
+import { onAuthStateChanged, signInAnonymously } from 'firebase/auth';
+import { FirebaseError } from 'firebase/app';
 
+// ---------- Tipos ----------
 type StatusProjeto = 'Em andamento' | 'Concluído' | 'Pendente';
 
 interface Projeto {
@@ -38,7 +52,7 @@ interface Projeto {
   status: StatusProjeto;
   dataInicio: string;   // DD/MM/AAAA
   dataEntrega: string;  // DD/MM/AAAA
-  createdAt?: any;
+  createdAt?: unknown;
 }
 
 interface Despesa {
@@ -48,15 +62,55 @@ interface Despesa {
   valor: number;
   data: string;         // DD/MM/AAAA
   projetoId?: string | null;
-  createdAt?: any;
+  createdAt?: unknown;
 }
 
-const db = getFirestore(app);
-const auth = getAuth(app);
+// ---------- Converters ----------
+const projetoConverter: FirestoreDataConverter<Projeto> = {
+  toFirestore(p: Projeto): DocumentData {
+    const { id: _ignore, ...rest } = p;
+    return rest;
+  },
+  fromFirestore(snapshot) {
+    const d = snapshot.data() as DocumentData;
+    return {
+      id: snapshot.id,
+      userId: String(d.userId ?? ''),
+      nome: String(d.nome ?? ''),
+      cliente: String(d.cliente ?? ''),
+      valor: Number(d.valor ?? 0),
+      status: (d.status as StatusProjeto) ?? 'Pendente',
+      dataInicio: String(d.dataInicio ?? ''),
+      dataEntrega: String(d.dataEntrega ?? ''),
+      createdAt: d.createdAt,
+    };
+  },
+};
+
+const despesaConverter: FirestoreDataConverter<Despesa> = {
+  toFirestore(x: Despesa): DocumentData {
+    const { id: _ignore, ...rest } = x;
+    return rest;
+  },
+  fromFirestore(snapshot) {
+    const d = snapshot.data() as DocumentData;
+    return {
+      id: snapshot.id,
+      userId: String(d.userId ?? ''),
+      descricao: String(d.descricao ?? ''),
+      valor: Number(d.valor ?? 0),
+      data: String(d.data ?? ''),
+      projetoId: d.projetoId ? String(d.projetoId) : null,
+      createdAt: d.createdAt,
+    };
+  },
+};
 
 export default function Freelancer() {
   const [uid, setUid] = useState<string>('');
   const [authReady, setAuthReady] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const triedRef = useRef(false);
 
   const [projetos, setProjetos] = useState<Projeto[]>([]);
   const [despesas, setDespesas] = useState<Despesa[]>([]);
@@ -70,51 +124,121 @@ export default function Freelancer() {
     descricao: '', valor: '', data: '', projetoId: '',
   });
 
+  // Debug/estado de índice
+  const [snapError, setSnapError] = useState<string | null>(null);
+  const [usingFallbackQuery, setUsingFallbackQuery] = useState(false);
+
   // ---------- Auth anônimo ----------
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
-      if (user) {
-        setUid(user.uid);
-        setAuthReady(true);
-      } else {
-        const cred = await signInAnonymously(auth);
-        setUid(cred.user.uid);
-        setAuthReady(true);
+      try {
+        if (user) {
+          startTransition(() => {
+            setUid(user.uid);
+            setAuthReady(true);
+            setAuthError(null);
+          });
+          return;
+        }
+        if (!triedRef.current) {
+          triedRef.current = true;
+          const cred = await signInAnonymously(auth);
+          startTransition(() => {
+            setUid(cred.user.uid);
+            setAuthReady(true);
+            setAuthError(null);
+          });
+        } else {
+          startTransition(() => {
+            setAuthReady(true);
+            setAuthError('auth/anonymous-disabled-or-restricted');
+          });
+        }
+      } catch (e) {
+        const code = e instanceof FirebaseError ? e.code : 'auth/unknown';
+        startTransition(() => {
+          setAuthReady(true);
+          setAuthError(code);
+        });
       }
     });
     return () => unsub();
   }, []);
 
-  // ---------- Listeners Firestore ----------
+  // ---------- Listeners Firestore (com fallback se faltar índice) ----------
   useEffect(() => {
-    if (!uid) return;
+    if (!authReady || !!authError || !uid) return;
 
-    // OBS: where(userId) + orderBy(createdAt) cria um índice composto (o console sugere).
-    const unsubProj = onSnapshot(
-      query(
-        collection(db, 'freelancer_projetos'),
-        where('userId', '==', uid),
-        orderBy('createdAt', 'desc'),
-      ),
-      (snap) =>
-        setProjetos(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))),
-    );
+    setSnapError((prev) => (prev !== null ? null : prev));
+    setUsingFallbackQuery((prev) => (prev ? false : prev));
 
-    const unsubDesp = onSnapshot(
-      query(
-        collection(db, 'freelancer_despesas'),
-        where('userId', '==', uid),
-        orderBy('createdAt', 'desc'),
-      ),
-      (snap) =>
-        setDespesas(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))),
-    );
+    const projCol = collection(db, 'freelancer_projetos').withConverter(projetoConverter);
+    const despCol = collection(db, 'freelancer_despesas').withConverter(despesaConverter);
 
-    return () => {
-      unsubProj();
-      unsubDesp();
+    const makeQuery = (useOrder: boolean) => {
+      const qProj: Query<Projeto> = useOrder
+        ? query(projCol, where('userId', '==', uid), orderBy('createdAt', 'desc'))
+        : query(projCol, where('userId', '==', uid));
+
+      const qDesp: Query<Despesa> = useOrder
+        ? query(despCol, where('userId', '==', uid), orderBy('createdAt', 'desc'))
+        : query(despCol, where('userId', '==', uid));
+
+      return { qProj, qDesp };
     };
-  }, [uid]);
+
+    const subscribe = (useOrder: boolean) => {
+      const { qProj, qDesp } = makeQuery(useOrder);
+
+      const unsubProj = onSnapshot(
+        qProj,
+        (snap) => {
+          const rows = snap.docs.map((d) => d.data());
+          startTransition(() => setProjetos(rows));
+        },
+        (err) => {
+          const code = err instanceof FirebaseError ? err.code : String(err);
+          startTransition(() => setSnapError(code));
+          if (code === 'failed-precondition' && useOrder) {
+            startTransition(() => setUsingFallbackQuery(true));
+            cleanup();
+            resubscribeWithoutOrder();
+          }
+        },
+      );
+
+      const unsubDesp = onSnapshot(
+        qDesp,
+        (snap) => {
+          const rows = snap.docs.map((d) => d.data());
+          startTransition(() => setDespesas(rows));
+        },
+        (err) => {
+          const code = err instanceof FirebaseError ? err.code : String(err);
+          startTransition(() => setSnapError(code));
+          if (code === 'failed-precondition' && useOrder) {
+            startTransition(() => setUsingFallbackQuery(true));
+            cleanup();
+            resubscribeWithoutOrder();
+          }
+        },
+      );
+
+      const cleanup = () => {
+        try { unsubProj(); } catch {}
+        try { unsubDesp(); } catch {}
+      };
+
+      const resubscribeWithoutOrder = () => {
+        subscribe(false);
+      };
+
+      return { cleanup };
+    };
+
+    const { cleanup } = subscribe(true);
+    return () => cleanup();
+  }, [uid, authReady, authError]);
 
   // ---------- Actions ----------
   const adicionarProjeto = async () => {
@@ -160,17 +284,19 @@ export default function Freelancer() {
   const removerProjeto = async (projetoId: string) => {
     if (!uid) return;
 
-    // remove despesas vinculadas
-    const q = query(
+    const qd = query(
       collection(db, 'freelancer_despesas'),
       where('userId', '==', uid),
       where('projetoId', '==', projetoId),
     );
-    const snap = await getDocs(q);
+    const snap = await getDocs(qd);
     await Promise.all(snap.docs.map((d) => deleteDoc(doc(db, 'freelancer_despesas', d.id))));
-
-    // remove o projeto
     await deleteDoc(doc(db, 'freelancer_projetos', projetoId));
+  };
+
+  // >>> NOVO: atualizar status direto pela UI
+  const atualizarStatusProjeto = async (projetoId: string, novoStatus: StatusProjeto) => {
+    await updateDoc(doc(db, 'freelancer_projetos', projetoId), { status: novoStatus });
   };
 
   // ---------- Derivados ----------
@@ -211,7 +337,7 @@ export default function Freelancer() {
             Em andamento
           </Badge>
         );
-      case 'Pendente':
+      default:
         return (
           <Badge className="bg-amber-100 text-amber-700 border-amber-300">
             <AlertCircle className="w-3 h-3 mr-1" />
@@ -221,16 +347,39 @@ export default function Freelancer() {
     }
   };
 
+  // ---------- UI de estados ----------
   if (!authReady) {
+    return <div className="p-8 text-center text-slate-500">Iniciando sessão segura…</div>;
+  }
+  if (authError) {
     return (
-      <div className="p-8 text-center text-slate-500">
-        Iniciando sessão segura…
+      <div className="p-8 text-center">
+        <p className="text-red-600 font-medium">
+          Falha ao autenticar: {authError}
+        </p>
+        <p className="text-slate-600 mt-2 text-sm">
+          Verifique se o método <b>Anônimo</b> está ativado em Authentication → Método de login,
+          se <b>localhost</b> está em Domínios autorizados e se a <b>API key</b> não está
+          bloqueada para este domínio.
+        </p>
       </div>
     );
   }
 
+  // ---------- UI principal ----------
   return (
     <div className="space-y-6">
+      {/* Barra de debug (remova se não quiser) */}
+      <div className="text-xs text-slate-600 p-2 border rounded mb-2 flex flex-wrap gap-3">
+        <span>UID atual: <span className="font-mono">{uid || '(vazio)'}</span></span>
+        {snapError && <span className="text-red-600">Snapshot error: {snapError}</span>}
+        {usingFallbackQuery && (
+          <span className="text-amber-600">
+            Usando fallback sem <code>orderBy(&apos;createdAt&apos;)</code> (crie/aguarde índice: userId ASC + createdAt DESC).
+          </span>
+        )}
+      </div>
+
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h2 className="text-slate-800 dark:text-slate-100">Painel do Freelancer</h2>
@@ -241,13 +390,14 @@ export default function Freelancer() {
 
         <div className="flex gap-2">
           {/* Novo Projeto */}
+          <Button
+            className="bg-gradient-to-r from-teal-500 to-teal-600 hover:from-teal-600 hover:to-teal-700"
+            onClick={() => setDialogProjetoOpen(true)}
+          >
+            <Plus className="w-4 h-4 mr-2" />
+            Novo Projeto
+          </Button>
           <Dialog open={dialogProjetoOpen} onOpenChange={setDialogProjetoOpen}>
-            <DialogTrigger asChild>
-              <Button className="bg-gradient-to-r from-teal-500 to-teal-600 hover:from-teal-600 hover:to-teal-700">
-                <Plus className="w-4 h-4 mr-2" />
-                Novo Projeto
-              </Button>
-            </DialogTrigger>
             <DialogContent>
               <DialogHeader>
                 <DialogTitle>Adicionar Novo Projeto</DialogTitle>
@@ -310,13 +460,14 @@ export default function Freelancer() {
           </Dialog>
 
           {/* Nova Despesa */}
+          <Button
+            className="bg-gradient-to-r from-rose-500 to-rose-600 hover:from-rose-600 hover:to-rose-700"
+            onClick={() => setDialogDespesaOpen(true)}
+          >
+            <Plus className="w-4 h-4 mr-2" />
+            Nova Despesa
+          </Button>
           <Dialog open={dialogDespesaOpen} onOpenChange={setDialogDespesaOpen}>
-            <DialogTrigger asChild>
-              <Button className="bg-gradient-to-r from-rose-500 to-rose-600 hover:from-rose-600 hover:to-rose-700">
-                <Plus className="w-4 h-4 mr-2" />
-                Nova Despesa
-              </Button>
-            </DialogTrigger>
             <DialogContent>
               <DialogHeader>
                 <DialogTitle>Adicionar Despesa</DialogTitle>
@@ -407,7 +558,7 @@ export default function Freelancer() {
               <Wallet className="w-8 h-8 text-purple-600" />
               <Badge className="bg-purple-600">Lucro Líquido</Badge>
             </div>
-            <p className="text-slate-600 text-sm mb-1">Bruto − Despesas</p>
+            <p className="text-slate-600 text-sm mb-1">{'Bruto \u2212 Despesas'}</p>
             <p className="text-slate-900">R$ {lucroLiquido.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
           </CardContent>
         </Card>
@@ -449,7 +600,22 @@ export default function Freelancer() {
                       </TableCell>
                       <TableCell className="text-slate-600">{projeto.dataInicio}</TableCell>
                       <TableCell className="text-slate-600">{projeto.dataEntrega}</TableCell>
-                      <TableCell>{getStatusBadge(projeto.status)}</TableCell>
+                      <TableCell>
+                        {/* Badge + seletor para alterar status */}
+                        <div className="flex items-center gap-2">
+                          {getStatusBadge(projeto.status)}
+                          <select
+                            aria-label="Alterar status"
+                            className="h-9 rounded-md border border-slate-200 bg-white px-2 text-xs outline-none dark:bg-slate-900 dark:border-slate-700"
+                            value={projeto.status}
+                            onChange={(e) => atualizarStatusProjeto(projeto.id, e.target.value as StatusProjeto)}
+                          >
+                            <option value="Pendente">Pendente</option>
+                            <option value="Em andamento">Em andamento</option>
+                            <option value="Concluído">Concluído</option>
+                          </select>
+                        </div>
+                      </TableCell>
                       <TableCell className="text-right">
                         <Button
                           variant="ghost"
