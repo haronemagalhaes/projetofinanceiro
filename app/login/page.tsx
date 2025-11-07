@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useMemo, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { auth } from '@/lib/firebaseConfig';
 import {
   setPersistence,
@@ -11,45 +11,73 @@ import {
 } from 'firebase/auth';
 import { Eye, EyeOff, LogIn } from 'lucide-react';
 
-// Se você usa shadcn-ui:
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-// Se não tiver shadcn, troque pelos seus inputs/botões.
 
 export default function LoginPage() {
   const router = useRouter();
+  const search = useSearchParams();
+
   const [email, setEmail] = useState('');
   const [senha, setSenha] = useState('');
   const [show, setShow] = useState(false);
   const [loading, setLoading] = useState(false);
   const [erro, setErro] = useState<string | null>(null);
+
   const allowed = (process.env.NEXT_PUBLIC_ALLOWED_EMAIL || '').trim().toLowerCase();
 
-  // Se quiser permitir vários e-mails, use:
-  // const allowedList = (process.env.NEXT_PUBLIC_ALLOWED_EMAILS || '')
-  //   .split(',')
-  //   .map((s) => s.trim().toLowerCase())
-  //   .filter(Boolean);
+  // next seguro (evita exception em decodeURIComponent malformado)
+  const nextPath = useMemo(() => {
+    const raw = search?.get('next');
+    if (!raw) return '/';
+    try {
+      const decoded = decodeURIComponent(raw);
+      // só permite caminhos internos
+      return decoded.startsWith('/') ? decoded : '/';
+    } catch {
+      return '/';
+    }
+  }, [search]);
 
   const validateAllowed = (mail: string) => {
     const m = (mail || '').trim().toLowerCase();
     if (!allowed) return true; // se não configurou, não bloqueia
     return m === allowed;
-    // Para lista:
-    // return allowedList.length === 0 ? true : allowedList.includes(m);
   };
 
+  // Cookie para o middleware; em prod adiciona Secure
   const setAuthCookie = () => {
-    // cookie simples pro middleware liberar
-    document.cookie = 'auth=1; Path=/; Max-Age=2592000; SameSite=Lax';
+    const attrs = [
+      'Path=/',
+      'SameSite=Lax',
+      `Max-Age=${60 * 60 * 24 * 30}`, // 30 dias
+    ];
+    if (process.env.NODE_ENV === 'production') attrs.push('Secure');
+    document.cookie = `auth=1; ${attrs.join('; ')}`;
+  };
+
+  const redirectWithCookie = (path: string) => {
+    // Força navegação full para garantir que o middleware receba o cookie
+    if (typeof window !== 'undefined') {
+      window.location.assign(path || '/');
+    } else {
+      router.replace(path || '/');
+    }
   };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setErro(null);
 
-    if (!validateAllowed(email)) {
+    const mail = email.trim();
+    const pass = senha;
+
+    if (!mail || !pass) {
+      setErro('Preencha e-mail e senha.');
+      return;
+    }
+    if (!validateAllowed(mail)) {
       setErro('Este e-mail não está autorizado a acessar o painel.');
       return;
     }
@@ -57,9 +85,9 @@ export default function LoginPage() {
     try {
       setLoading(true);
       await setPersistence(auth, browserLocalPersistence);
-      await signInWithEmailAndPassword(auth, email, senha);
+      await signInWithEmailAndPassword(auth, mail, pass);
       setAuthCookie();
-      router.replace('/'); // vai pro painel
+      redirectWithCookie(nextPath);
     } catch (err: any) {
       const code = String(err?.code || err?.message || err);
       let msg = 'Falha ao entrar. Verifique e-mail e senha.';
@@ -73,19 +101,27 @@ export default function LoginPage() {
     }
   };
 
-  // Opcional: criar usuário (apenas se o e-mail for permitido)
   const handleCreate = async () => {
     setErro(null);
-    if (!validateAllowed(email)) {
+
+    const mail = email.trim();
+    const pass = senha;
+
+    if (!mail || !pass) {
+      setErro('Preencha e-mail e senha.');
+      return;
+    }
+    if (!validateAllowed(mail)) {
       setErro('Este e-mail não está autorizado a criar conta.');
       return;
     }
+
     try {
       setLoading(true);
       await setPersistence(auth, browserLocalPersistence);
-      await createUserWithEmailAndPassword(auth, email, senha);
+      await createUserWithEmailAndPassword(auth, mail, pass);
       setAuthCookie();
-      router.replace('/');
+      redirectWithCookie(nextPath);
     } catch (err: any) {
       const code = String(err?.code || err?.message || err);
       let msg = 'Não foi possível criar a conta.';
@@ -119,7 +155,7 @@ export default function LoginPage() {
               autoComplete="email"
               placeholder="voce@dominio.com"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => { setEmail(e.target.value); if (erro) setErro(null); }}
               required
               className="mt-1"
             />
@@ -134,7 +170,7 @@ export default function LoginPage() {
                 autoComplete="current-password"
                 placeholder="••••••••"
                 value={senha}
-                onChange={(e) => setSenha(e.target.value)}
+                onChange={(e) => { setSenha(e.target.value); if (erro) setErro(null); }}
                 required
                 className="pr-10"
               />
@@ -165,7 +201,6 @@ export default function LoginPage() {
           </Button>
         </form>
 
-        {/* Ações auxiliares */}
         <div className="mt-4 space-y-2 text-center text-xs text-slate-500 dark:text-slate-400">
           <p>
             Primeiro acesso?{' '}
@@ -178,9 +213,11 @@ export default function LoginPage() {
             </button>{' '}
             (somente e-mail autorizado).
           </p>
-          <p className="opacity-70">
-            E-mail permitido: {allowed ? <code>{allowed}</code> : ''}
-          </p>
+          {allowed && (
+            <p className="opacity-70">
+              E-mail permitido: <code>{allowed}</code>
+            </p>
+          )}
         </div>
       </div>
     </main>

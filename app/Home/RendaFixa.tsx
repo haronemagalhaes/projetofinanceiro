@@ -1,27 +1,16 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import {
-  Card, CardContent, CardDescription, CardHeader, CardTitle
-} from '../../components/ui/card';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { Button } from '../../components/ui/button';
 import { Badge } from '../../components/ui/badge';
 import { Plus, Trash2, Calendar, DollarSign } from 'lucide-react';
 
-import app from '@/lib/firebaseConfig';
-import {
-  getFirestore,
-  collection,
-  addDoc,
-  deleteDoc,
-  doc,
-  onSnapshot,
-  query,
-  orderBy,
-  serverTimestamp,
-} from 'firebase/firestore';
+import { db } from '@/lib/firebaseClients';
+import { useAuth } from '@/hooks/useAuth';
+import { collection, addDoc, deleteDoc, doc, onSnapshot, query, orderBy, serverTimestamp } from 'firebase/firestore';
 
 interface RendaFixaItem {
   id: string;
@@ -31,17 +20,24 @@ interface RendaFixaItem {
   categoria: string;
 }
 
+type RendaFixaDoc = {
+  descricao?: string;
+  valor?: number;
+  diaVencimento?: number;
+  categoria?: string;
+};
+
 type NovaRendaForm = {
   descricao: string;
-  valor: string;          
-  diaVencimento: string;  
+  valor: string;
+  diaVencimento: string;
   categoria: string;
 };
 
-const db = getFirestore(app);
 const COL = 'rendas_fixas';
 
 export default function RendaFixa() {
+  const { uid, loading: loadingUser } = useAuth(); // ✅ agora tem uid
   const [rendas, setRendas] = useState<RendaFixaItem[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -53,18 +49,24 @@ export default function RendaFixa() {
   });
 
   useEffect(() => {
-    const q = query(collection(db, COL), orderBy('diaVencimento', 'asc'));
+    if (!uid) return; // espera autenticar
+
+    const q = query(
+      collection(db, 'users', uid, COL),
+      orderBy('diaVencimento', 'asc')
+    );
+
     const unsub = onSnapshot(
       q,
       (snap) => {
         const list: RendaFixaItem[] = snap.docs.map((d) => {
-          const data = d.data() as Omit<RendaFixaItem, 'id'>;
+          const data = d.data() as RendaFixaDoc;
           return {
             id: d.id,
-            descricao: data.descricao,
-            valor: Number(data.valor) || 0,
-            diaVencimento: Number(data.diaVencimento) || 1,
-            categoria: data.categoria ?? 'Outros',
+            descricao: String(data.descricao ?? ''),
+            valor: Number(data.valor ?? 0),
+            diaVencimento: Number(data.diaVencimento ?? 1),
+            categoria: String(data.categoria ?? 'Outros'),
           };
         });
         setRendas(list);
@@ -75,17 +77,19 @@ export default function RendaFixa() {
         setLoading(false);
       }
     );
+
     return () => unsub();
-  }, []);
+  }, [uid]);
 
   const adicionarRenda = async () => {
+    if (!uid) return;
     if (!novaRenda.descricao || !novaRenda.valor || !novaRenda.diaVencimento) return;
 
-    const valor = Math.max(0, parseFloat(novaRenda.valor) || 0);
+    const valor = Math.max(0, parseFloat(novaRenda.valor.replace(',', '.')) || 0);
     const dia = Math.min(31, Math.max(1, parseInt(novaRenda.diaVencimento) || 1));
 
     try {
-      await addDoc(collection(db, COL), {
+      await addDoc(collection(db, 'users', uid, COL), {
         descricao: novaRenda.descricao.trim(),
         valor,
         diaVencimento: dia,
@@ -99,8 +103,9 @@ export default function RendaFixa() {
   };
 
   const removerRenda = async (id: string) => {
+    if (!uid) return;
     try {
-      await deleteDoc(doc(db, COL, id));
+      await deleteDoc(doc(db, 'users', uid, COL, id));
     } catch (e) {
       console.error('Erro ao remover renda fixa:', e);
     }
@@ -126,6 +131,8 @@ export default function RendaFixa() {
     }
   };
 
+  if (loadingUser) return null; // espera auth
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-4">
@@ -137,7 +144,6 @@ export default function RendaFixa() {
           Total Mensal: R$ {totalRendaFixa.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
         </Badge>
       </div>
-
 
       <Card className="bg-gradient-to-br from-emerald-600 via-green-600 to-teal-600 dark:from-emerald-700 dark:via-green-700 dark:to-teal-700 text-white border-0 shadow-lg">
         <CardContent className="p-8">
@@ -157,7 +163,6 @@ export default function RendaFixa() {
       </Card>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-    
         <Card className="dark:bg-slate-800/50 dark:border-slate-700">
           <CardHeader>
             <CardTitle className="dark:text-slate-100">Adicionar Renda Fixa</CardTitle>
@@ -172,9 +177,7 @@ export default function RendaFixa() {
                 id="descricaoFixa"
                 placeholder="Ex: Salário, Aluguel..."
                 value={novaRenda.descricao}
-                onChange={(e) =>
-                  setNovaRenda({ ...novaRenda, descricao: e.target.value })
-                }
+                onChange={(e) => setNovaRenda({ ...novaRenda, descricao: e.target.value })}
               />
             </div>
             <div className="space-y-2">
@@ -184,9 +187,7 @@ export default function RendaFixa() {
                 type="number"
                 placeholder="0.00"
                 value={novaRenda.valor}
-                onChange={(e) =>
-                  setNovaRenda({ ...novaRenda, valor: e.target.value })
-                }
+                onChange={(e) => setNovaRenda({ ...novaRenda, valor: e.target.value })}
               />
             </div>
             <div className="space-y-2">
@@ -198,9 +199,7 @@ export default function RendaFixa() {
                 max={31}
                 placeholder="1-31"
                 value={novaRenda.diaVencimento}
-                onChange={(e) =>
-                  setNovaRenda({ ...novaRenda, diaVencimento: e.target.value })
-                }
+                onChange={(e) => setNovaRenda({ ...novaRenda, diaVencimento: e.target.value })}
               />
             </div>
             <div className="space-y-2">
@@ -209,9 +208,7 @@ export default function RendaFixa() {
                 id="categoriaFixa"
                 placeholder="Ex: Trabalho, Imóveis, Investimentos..."
                 value={novaRenda.categoria}
-                onChange={(e) =>
-                  setNovaRenda({ ...novaRenda, categoria: e.target.value })
-                }
+                onChange={(e) => setNovaRenda({ ...novaRenda, categoria: e.target.value })}
               />
             </div>
             <Button
@@ -237,9 +234,7 @@ export default function RendaFixa() {
             ) : (
               <div className="space-y-3 max-h-[400px] overflow-y-auto">
                 {rendas.length === 0 ? (
-                  <p className="text-slate-500 text-center py-8">
-                    Nenhuma renda fixa cadastrada
-                  </p>
+                  <p className="text-slate-500 text-center py-8">Nenhuma renda fixa cadastrada</p>
                 ) : (
                   rendas.map((renda) => (
                     <div
@@ -261,9 +256,7 @@ export default function RendaFixa() {
                         </div>
                         <div className="flex items-center gap-3">
                           <p className="text-emerald-700">
-                            R$ {renda.valor.toLocaleString('pt-BR', {
-                              minimumFractionDigits: 2,
-                            })}
+                            R$ {renda.valor.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
                           </p>
                           <Button
                             variant="ghost"
@@ -301,11 +294,10 @@ export default function RendaFixa() {
               return (
                 <div
                   key={dia}
-                  className={`aspect-square rounded-lg p-2 flex flex-col items-center justify-center text-sm transition-all ${
-                    hasRenda
-                      ? 'bg-gradient-to-br from-emerald-500 to-green-600 text-white shadow-md hover:shadow-lg'
-                      : 'bg-slate-100 text-slate-400 hover:bg-slate-200'
-                  }`}
+                  className={`aspect-square rounded-lg p-2 flex flex-col items-center justify-center text-sm transition-all ${hasRenda
+                    ? 'bg-gradient-to-br from-emerald-500 to-green-600 text-white shadow-md hover:shadow-lg'
+                    : 'bg-slate-100 text-slate-400 hover:bg-slate-200'
+                    }`}
                 >
                   <span>{dia}</span>
                   {hasRenda && <span className="text-xs mt-1">{rendasDoDia.length}</span>}

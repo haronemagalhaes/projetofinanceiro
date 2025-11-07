@@ -10,10 +10,14 @@ export function BotaoSair() {
 
   const handleLogout = async () => {
     try {
+      // encerra sessão do Firebase
       await signOut(auth);
-      Cookies.remove('auth', { path: '/' }); // apaga o mesmo cookie do login
-      router.refresh();                      // força reavaliação pelo middleware
-      router.replace('/login');              // vai para o login
+
+      // remove o cookie do middleware
+      Cookies.remove('auth', { path: '/' });
+
+      // redireciona direto (sem refresh extra)
+      router.replace('/login');
     } catch (e) {
       console.error('Erro ao sair:', e);
     }

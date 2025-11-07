@@ -32,12 +32,14 @@ import type {
   SnapshotOptions,
 } from 'firebase/firestore';
 
-import app from '@/lib/firebaseConfig';
+import { db, auth } from '@/lib/firebaseConfig';
 import {
-  getFirestore, collection, addDoc, deleteDoc, doc, onSnapshot, query, where, orderBy,
+  collection, addDoc, deleteDoc, doc, onSnapshot, query, where, orderBy,
   getDocs, serverTimestamp,
 } from 'firebase/firestore';
+import { onAuthStateChanged } from 'firebase/auth';
 
+/* -------------------- Tipos -------------------- */
 type Compra = {
   id: string;
   cartaoId: string;
@@ -45,7 +47,7 @@ type Compra = {
   valor: number;
   parcelas: number;
   parcelaAtual: number;
-  dataISO: string; 
+  dataISO: string;
 };
 
 type Cartao = {
@@ -55,8 +57,15 @@ type Cartao = {
   limite: number;
 };
 
-const db = getFirestore(app);
+/* -------------------- Utils seguros -------------------- */
+const asNum = (v: unknown, fallback = 0) => (typeof v === 'number' ? v : Number(v)) || fallback;
+const asStr = (v: unknown, fallback = '') => (typeof v === 'string' ? v : String(v ?? fallback));
+
 export default function CartoesCredito() {
+  const [uid, setUid] = useState<string>('');
+  const [authReady, setAuthReady] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+
   const [cartoes, setCartoes] = useState<Cartao[]>([]);
   const [compras, setCompras] = useState<Compra[]>([]);
   const [activeTab, setActiveTab] = useState<string>('');
@@ -86,50 +95,65 @@ export default function CartoesCredito() {
     { nome: 'Âmbar', valor: '#f59e0b' },
   ];
 
-
+  /* -------------------- Converters -------------------- */
   const cartaoConverter: FirestoreDataConverter<Cartao> = {
     toFirestore(c: Cartao): DocumentData {
-      return { nome: c.nome, cor: c.cor, limite: c.limite };
+      const { id, ...rest } = c;
+      void id;
+      return rest;
     },
     fromFirestore(snapshot: QueryDocumentSnapshot, options: SnapshotOptions): Cartao {
       const d = snapshot.data(options) as DocumentData;
       return {
         id: snapshot.id,
-        nome: String(d.nome ?? ''),
-        cor: String(d.cor ?? '#3b82f6'),
-        limite: Number(d.limite ?? 0),
+        nome: asStr(d.nome),
+        cor: asStr(d.cor, '#3b82f6'),
+        limite: asNum(d.limite),
       };
     },
   };
 
   const compraConverter: FirestoreDataConverter<Compra> = {
     toFirestore(c: Compra): DocumentData {
-      return {
-        cartaoId: c.cartaoId,
-        nome: c.nome,
-        valor: c.valor,
-        parcelas: c.parcelas,
-        parcelaAtual: c.parcelaAtual,
-        dataISO: c.dataISO,
-      };
+      const { id, ...rest } = c;
+      void id;
+      return rest;
     },
     fromFirestore(snapshot: QueryDocumentSnapshot, options: SnapshotOptions): Compra {
       const d = snapshot.data(options) as DocumentData;
       return {
         id: snapshot.id,
-        cartaoId: String(d.cartaoId ?? ''),
-        nome: String(d.nome ?? ''),
-        valor: Number(d.valor ?? 0),
-        parcelas: Number(d.parcelas ?? 1),
-        parcelaAtual: Number(d.parcelaAtual ?? 1),
-        dataISO: String(d.dataISO ?? new Date().toISOString().slice(0, 10)),
+        cartaoId: asStr(d.cartaoId),
+        nome: asStr(d.nome),
+        valor: asNum(d.valor),
+        parcelas: Math.max(1, asNum(d.parcelas, 1)),
+        parcelaAtual: Math.max(1, asNum(d.parcelaAtual, 1)),
+        dataISO: asStr(d.dataISO, new Date().toISOString().slice(0, 10)),
       };
     },
   };
 
+  /* -------------------- Auth -------------------- */
   useEffect(() => {
-    const cartoesCol = collection(db, 'cartoes').withConverter(cartaoConverter);
-    const comprasCol = collection(db, 'cartao_compras').withConverter(compraConverter);
+    const unsub = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        setUid(user.uid);
+        setAuthReady(true);
+        setAuthError(null);
+      } else {
+        setAuthReady(true);
+        setAuthError('auth/required');
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  /* -------------------- Listeners por usuário -------------------- */
+  useEffect(() => {
+    if (!authReady || !uid || authError) return;
+
+    const cartoesCol = collection(db, 'users', uid, 'cartoes').withConverter(cartaoConverter);
+    const comprasCol = collection(db, 'users', uid, 'cartao_compras').withConverter(compraConverter);
 
     const unsubCartoes = onSnapshot(query(cartoesCol, orderBy('nome', 'asc')), (snap) => {
       const list = snap.docs.map((d) => d.data());
@@ -146,10 +170,9 @@ export default function CartoesCredito() {
       unsubCartoes();
       unsubCompras();
     };
-   
-  }, []); 
+  }, [authReady, authError, uid, activeTab]);
 
-  
+  /* -------------------- Derivados -------------------- */
   const comprasByCartao = useMemo(() => {
     const m = new Map<string, Compra[]>();
     for (const c of compras) {
@@ -192,16 +215,17 @@ export default function CartoesCredito() {
     };
   });
 
-  const dadosPizza = cartoes
+  const dadosPizza: Array<{ nome: string; valor: number; cor: string }> = cartoes
     .map((c) => ({ nome: c.nome, valor: usadoPorCartao.get(c.id) || 0, cor: c.cor }))
     .filter((x) => x.valor > 0);
 
- 
+  /* -------------------- Ações -------------------- */
   const adicionarCartao = async () => {
+    if (!uid) return;
     if (!novoCartao.nome || !novoCartao.limite) return;
     const limite = Math.max(0, parseFloat(novoCartao.limite) || 0);
     try {
-      const ref = await addDoc(collection(db, 'cartoes'), {
+      const ref = await addDoc(collection(db, 'users', uid, 'cartoes'), {
         nome: novoCartao.nome.trim(),
         cor: novoCartao.cor,
         limite,
@@ -216,6 +240,7 @@ export default function CartoesCredito() {
   };
 
   const adicionarCompra = async (cartaoId: string) => {
+    if (!uid) return;
     if (!novaCompra.nome || !novaCompra.valor || !novaCompra.parcelas) return;
     const total = Math.max(0, parseFloat(novaCompra.valor) || 0);
     const qtdParcelas = Math.max(1, parseInt(novaCompra.parcelas) || 1);
@@ -225,12 +250,12 @@ export default function CartoesCredito() {
         : new Date().toISOString().slice(0, 10);
 
     try {
-      await addDoc(collection(db, 'cartao_compras'), {
+      await addDoc(collection(db, 'users', uid, 'cartao_compras'), {
         cartaoId,
         nome: novaCompra.nome.trim(),
         valor: total,
         parcelas: qtdParcelas,
-        parcelaAtual: 1, 
+        parcelaAtual: 1, // primeira parcela já no mês corrente
         dataISO,
         createdAt: serverTimestamp(),
       });
@@ -242,21 +267,23 @@ export default function CartoesCredito() {
   };
 
   const removerCompra = async (compraId: string) => {
+    if (!uid) return;
     try {
-      await deleteDoc(doc(db, 'cartao_compras', compraId));
+      await deleteDoc(doc(db, 'users', uid, 'cartao_compras', compraId));
     } catch (e) {
       console.error('Erro ao remover compra:', e);
     }
   };
 
   const removerCartao = async (cartaoId: string) => {
+    if (!uid) return;
     try {
-      const q = query(collection(db, 'cartao_compras'), where('cartaoId', '==', cartaoId));
+      const q = query(collection(db, 'users', uid, 'cartao_compras'), where('cartaoId', '==', cartaoId));
       const snap = await getDocs(q);
-      const deletions = snap.docs.map((d) => deleteDoc(doc(db, 'cartao_compras', d.id)));
+      const deletions = snap.docs.map((d) => deleteDoc(doc(db, 'users', uid, 'cartao_compras', d.id)));
       await Promise.all(deletions);
-    
-      await deleteDoc(doc(db, 'cartoes', cartaoId));
+
+      await deleteDoc(doc(db, 'users', uid, 'cartoes', cartaoId));
 
       const rest = cartoes.filter((c) => c.id !== cartaoId);
       if (rest.length) setActiveTab(rest[0].id);
@@ -266,6 +293,16 @@ export default function CartoesCredito() {
     }
   };
 
+  /* -------------------- Render -------------------- */
+  if (!authReady) return null;
+  if (authError) {
+    return (
+      <div className="p-6 text-sm text-red-600">
+        Erro de autenticação: {authError}. Faça login para visualizar seus cartões.
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-4">
@@ -274,14 +311,14 @@ export default function CartoesCredito() {
           <p className="text-slate-600 dark:text-slate-400">Gerencie seus cartões e compras parceladas</p>
         </div>
         <div className="flex items-center gap-3">
-          <Badge className="bg-gradient-to-r from-blue-500 to-blue-600 text-white px-4 py-2">
+          <Badge className="bg-linear-to-r from-blue-500 to-blue-600 text-white px-4 py-2">
             Total Gasto (mês):{' '}
             {totalGastoCartoes.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
           </Badge>
 
           <Dialog open={dialogNovoCartao} onOpenChange={setDialogNovoCartao}>
             <DialogTrigger asChild>
-              <Button className="bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700">
+              <Button className="bg-linear-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700">
                 <Plus className="w-4 h-4 mr-2" />
                 Novo Cartão
               </Button>
@@ -315,9 +352,8 @@ export default function CartoesCredito() {
                     {cores.map((cor) => (
                       <button
                         key={cor.valor}
-                        className={`h-12 rounded-lg border-2 transition-all ${
-                          novoCartao.cor === cor.valor ? 'border-slate-900 scale-105' : 'border-slate-200'
-                        }`}
+                        className={`h-12 rounded-lg border-2 transition-all ${novoCartao.cor === cor.valor ? 'border-slate-900 scale-105' : 'border-slate-200'
+                          }`}
                         style={{ backgroundColor: cor.valor }}
                         onClick={() => setNovoCartao({ ...novoCartao, cor: cor.valor })}
                         aria-label={`Selecionar cor ${cor.nome}`}
@@ -325,7 +361,7 @@ export default function CartoesCredito() {
                     ))}
                   </div>
                 </div>
-                <Button onClick={adicionarCartao} className="w-full bg-gradient-to-r from-blue-500 to-blue-600">
+                <Button onClick={adicionarCartao} className="w-full bg-linear-to-r from-blue-500 to-blue-600">
                   <CreditCard className="w-4 h-4 mr-2" />
                   Criar Cartão
                 </Button>
@@ -336,7 +372,7 @@ export default function CartoesCredito() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <Card className="border-blue-200 dark:border-blue-900 bg-gradient-to-br from-blue-50 to-cyan-50 dark:from-blue-950/30 dark:to-cyan-950/30">
+        <Card className="border-blue-200 dark:border-blue-900 bg-linear-to-br from-blue-50 to-cyan-50 dark:from-blue-950/30 dark:to-cyan-950/30">
           <CardContent className="p-6">
             <div className="flex items-center gap-3 mb-3">
               <div className="p-3 bg-blue-100 rounded-xl">
@@ -352,7 +388,7 @@ export default function CartoesCredito() {
           </CardContent>
         </Card>
 
-        <Card className="border-emerald-200 dark:border-emerald-900 bg-gradient-to-br from-emerald-50 to-green-50 dark:from-emerald-950/30 dark:to-green-950/30">
+        <Card className="border-emerald-200 dark:border-emerald-900 bg-linear-to-br from-emerald-50 to-green-50 dark:from-emerald-950/30 dark:to-green-950/30">
           <CardContent className="p-6">
             <div className="flex items-center gap-3 mb-3">
               <div className="p-3 bg-emerald-100 rounded-xl">
@@ -368,7 +404,7 @@ export default function CartoesCredito() {
           </CardContent>
         </Card>
 
-        <Card className="border-purple-200 dark:border-purple-900 bg-gradient-to-br from-purple-50 to-indigo-50 dark:from-purple-950/30 dark:to-indigo-950/30">
+        <Card className="border-purple-200 dark:border-purple-900 bg-linear-to-br from-purple-50 to-indigo-50 dark:from-purple-950/30 dark:to-indigo-950/30">
           <CardContent className="p-6">
             <div className="flex items-center gap-3 mb-3">
               <div className="p-3 bg-purple-100 rounded-xl">
@@ -405,7 +441,7 @@ export default function CartoesCredito() {
             <CreditCard className="w-16 h-16 text-slate-300 dark:text-slate-600 mx-auto mb-4" />
             <h3 className="text-slate-600 dark:text-slate-300 mb-2">Nenhum cartão cadastrado</h3>
             <p className="text-slate-500 dark:text-slate-400 mb-4">Crie seu primeiro cartão</p>
-            <Button onClick={() => setDialogNovoCartao(true)} className="bg-gradient-to-r from-blue-500 to-blue-600">
+            <Button onClick={() => setDialogNovoCartao(true)} className="bg-linear-to-r from-blue-500 to-blue-600">
               <Plus className="w-4 h-4 mr-2" /> Criar Primeiro Cartão
             </Button>
           </CardContent>
@@ -441,7 +477,10 @@ export default function CartoesCredito() {
                   <CardContent className="p-6">
                     <div className="flex items-center justify-between flex-wrap gap-4 mb-4">
                       <div className="flex items-center gap-4">
-                        <div className="w-16 h-16 rounded-xl flex items-center justify-center" style={{ backgroundColor: `${cartao.cor}20` }}>
+                        <div
+                          className="w-16 h-16 rounded-xl flex items-center justify-center"
+                          style={{ backgroundColor: `${cartao.cor}20` }}
+                        >
                           <CreditCard className="w-8 h-8" style={{ color: cartao.cor }} />
                         </div>
                         <div>
@@ -456,7 +495,10 @@ export default function CartoesCredito() {
                         <div className="text-right">
                           <p className="text-slate-600 text-sm">Disponível</p>
                           <p className="text-emerald-700">
-                            {(Math.max(0, cartao.limite - utilizado)).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
+                            {Math.max(0, cartao.limite - utilizado).toLocaleString('pt-BR', {
+                              style: 'currency',
+                              currency: 'BRL',
+                            })}
                           </p>
                         </div>
                         <Button
@@ -496,7 +538,10 @@ export default function CartoesCredito() {
                       </div>
                       <Dialog open={dialogNovaCompra} onOpenChange={setDialogNovaCompra}>
                         <DialogTrigger asChild>
-                          <Button size="sm" className="bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700">
+                          <Button
+                            size="sm"
+                            className="bg-linear-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700"
+                          >
                             <ShoppingBag className="w-4 h-4 mr-2" />
                             Adicionar Compra
                           </Button>
@@ -568,7 +613,7 @@ export default function CartoesCredito() {
 
                             <Button
                               onClick={() => adicionarCompra(cartao.id)}
-                              className="w-full bg-gradient-to-r from-emerald-500 to-emerald-600"
+                              className="w-full bg-linear-to-r from-emerald-500 to-emerald-600"
                             >
                               <ShoppingBag className="w-4 h-4 mr-2" />
                               Registrar Compra
@@ -651,6 +696,7 @@ export default function CartoesCredito() {
         </Tabs>
       )}
 
+      {/* ====== Gráficos ====== */}
       {cartoes.length > 0 && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <Card>
@@ -666,8 +712,10 @@ export default function CartoesCredito() {
                   <YAxis stroke="#64748b" />
                   <Tooltip
                     contentStyle={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px' }}
-                    formatter={(value: unknown) =>
-                      (Number(value as number)).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+                    formatter={(value: number | string) =>
+                      typeof value === 'number'
+                        ? value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+                        : value
                     }
                   />
                   <Legend />
@@ -681,39 +729,38 @@ export default function CartoesCredito() {
           <Card>
             <CardHeader>
               <CardTitle>Distribuição de Gastos</CardTitle>
-              <CardDescription>Proporção entre cartões</CardDescription>
+              <CardDescription>Proporção por cartão (mês)</CardDescription>
             </CardHeader>
             <CardContent>
-              {dadosPizza.length > 0 ? (
-                <ResponsiveContainer width="100%" height={300}>
-                  <PieChart>
-                    <Pie
-                      data={dadosPizza}
-                      cx="50%"
-                      cy="50%"
-                      labelLine={false}
-                      label={({ nome, percent }) => `${nome} ${(percent * 100).toFixed(0)}%`}
-                      outerRadius={100}
-                      fill="#8884d8"
-                      dataKey="valor"
-                    >
-                      {dadosPizza.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={entry.cor} />
-                      ))}
-                    </Pie>
-                    <Tooltip
-                      formatter={(value: unknown) =>
-                        (Number(value as number)).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
-                      }
-                      contentStyle={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px' }}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
-              ) : (
-                <div className="h-[300px] flex items-center justify-center text-slate-500">
-                  Nenhum gasto registrado ainda
-                </div>
-              )}
+              <ResponsiveContainer width="100%" height={300}>
+                <PieChart>
+                  <Pie
+                    data={dadosPizza}           // [{ nome, valor, cor }]
+                    dataKey="valor"
+                    nameKey="nome"
+                    cx="50%"
+                    cy="50%"
+                    outerRadius={95}
+                    isAnimationActive={false}
+                  >
+                    {dadosPizza.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.cor} />
+                    ))}
+                  </Pie>
+                  <Tooltip
+                    formatter={(value: number | string) =>
+                      typeof value === 'number'
+                        ? value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+                        : value
+                    }
+                    contentStyle={{
+                      backgroundColor: '#fff',
+                      border: '1px solid #e2e8f0',
+                      borderRadius: 8,
+                    }}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
             </CardContent>
           </Card>
         </div>

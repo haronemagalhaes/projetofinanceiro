@@ -17,27 +17,20 @@ import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 
 import {
-  AlertCircle, AlertTriangle, Calendar, Car, DollarSign, GraduationCap,
+  AlertTriangle, Calendar, Car, DollarSign, GraduationCap,
   Heart, Home, Phone, Plus, ShoppingBag, Wifi, Zap, PiggyBank, Trash2,
 } from 'lucide-react';
-
 
 import {
   PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
 } from 'recharts';
 
-import app from '@/lib/firebaseConfig';
+// Firebase centralizado + auth
+import { db } from '@/lib/firebaseClients';
+import { useAuth } from '@/hooks/useAuth';
 import {
-  getFirestore,
-  collection,
-  addDoc,
-  deleteDoc,
-  doc,
-  onSnapshot,
-  query,
-  orderBy,
-  serverTimestamp,
+  collection, addDoc, deleteDoc, doc, onSnapshot, query, orderBy, serverTimestamp,
 } from 'firebase/firestore';
 
 type GastoFixo = {
@@ -62,27 +55,32 @@ const CATEGORIAS = [
 
 const PIE_COLORS = ['#3b82f6', '#8b5cf6', '#eab308', '#06b6d4', '#10b981', '#f59e0b', '#ef4444', '#6b7280'];
 
-const db = getFirestore(app);
 const COL = 'gastos_fixos';
 
 export default function GastosFixos() {
+  const { uid, loading: loadingUser } = useAuth();
+
   const [gastos, setGastos] = useState<GastoFixo[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const [novo, setNovo] = useState<{ nome: string; valor: string; categoria: string; diaVencimento: string }>({
-    nome: '',
-    valor: '',
-    categoria: '',
-    diaVencimento: '',
-  });
+  const [novo, setNovo] = useState<{ nome: string; valor: string; categoria: string; diaVencimento: string }>(
+    { nome: '', valor: '', categoria: '', diaVencimento: '' }
+  );
 
+  // Listener por usuário
   useEffect(() => {
-    const q = query(collection(db, COL), orderBy('diaVencimento', 'asc'));
+    if (!uid) return;
+
+    const q = query(
+      collection(db, 'users', uid, COL),
+      orderBy('diaVencimento', 'asc')
+    );
+
     const unsub = onSnapshot(
       q,
       (snap) => {
         const list: GastoFixo[] = snap.docs.map((d) => {
-          const x = d.data() as any;
+          const x = d.data() as Record<string, unknown>;
           return {
             id: d.id,
             nome: String(x.nome ?? ''),
@@ -100,10 +98,10 @@ export default function GastosFixos() {
         setLoading(false);
       }
     );
-    return () => unsub();
-  }, []);
 
- 
+    return () => unsub();
+  }, [uid]);
+
   const totalAtivo = useMemo(
     () => gastos.filter(g => g.ativo).reduce((acc, g) => acc + g.valor, 0),
     [gastos],
@@ -120,12 +118,10 @@ export default function GastosFixos() {
     });
   }, [gastos]);
 
-
   const renderPieLabel = (entry: { name: string; value: number }) => {
     const pct = totalAtivo > 0 ? (entry.value / totalAtivo) * 100 : 0;
     return `${entry.name}: ${pct.toFixed(0)}%`;
   };
-
 
   const barData = useMemo(
     () =>
@@ -137,8 +133,8 @@ export default function GastosFixos() {
     [gastos],
   );
 
- 
   const hoje = new Date().getDate();
+
   const proximos = useMemo(
     () =>
       gastos
@@ -153,7 +149,6 @@ export default function GastosFixos() {
     [gastos],
   );
 
-
   const money = (n: number) => n.toLocaleString('pt-BR', { minimumFractionDigits: 2 });
   const getCategoriaColor = (categoria: string) =>
     CATEGORIAS.find(c => c.value === categoria)?.color ?? '#6b7280';
@@ -162,15 +157,16 @@ export default function GastosFixos() {
     return <Icon className="h-4 w-4" />;
   };
 
- 
+  // CRUD em users/{uid}/gastos_fixos
   const addGasto = async () => {
+    if (!uid) return;
     if (!novo.nome || !novo.valor || !novo.categoria || !novo.diaVencimento) return;
 
     const dia = Math.max(1, Math.min(31, parseInt(novo.diaVencimento, 10) || 1));
-    const valor = Math.max(0, parseFloat(novo.valor) || 0);
+    const valor = Math.max(0, parseFloat(novo.valor.replace(',', '.')) || 0);
 
     try {
-      await addDoc(collection(db, COL), {
+      await addDoc(collection(db, 'users', uid, COL), {
         nome: novo.nome.trim(),
         valor,
         categoria: novo.categoria,
@@ -185,15 +181,19 @@ export default function GastosFixos() {
   };
 
   const removeGasto = async (id: string) => {
+    if (!uid) return;
     try {
-      await deleteDoc(doc(db, COL, id));
+      await deleteDoc(doc(db, 'users', uid, COL, id));
     } catch (e) {
       console.error('Erro ao remover gasto fixo:', e);
     }
   };
 
+  if (loadingUser) return null;
+
   return (
     <div className="space-y-6">
+      {/* Cards superiores */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         <Card className="border-none bg-gradient-to-br from-red-500 to-red-600 text-white shadow-lg">
           <CardHeader className="pb-3">
@@ -210,7 +210,7 @@ export default function GastosFixos() {
 
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2">
+            <CardTitle className="flex items中心 gap-2">
               <Calendar className="h-5 w-5 text-blue-500" />
               Próximos Vencimentos
             </CardTitle>
@@ -248,6 +248,7 @@ export default function GastosFixos() {
         </Alert>
       )}
 
+      {/* Formulário */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -323,6 +324,7 @@ export default function GastosFixos() {
         </CardContent>
       </Card>
 
+      {/* Gráficos */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
@@ -375,6 +377,7 @@ export default function GastosFixos() {
         </Card>
       </div>
 
+      {/* Calendário */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -412,6 +415,7 @@ export default function GastosFixos() {
         </CardContent>
       </Card>
 
+      {/* Tabela */}
       <Card>
         <CardHeader>
           <CardTitle>Todos os Gastos Fixos</CardTitle>
@@ -422,7 +426,6 @@ export default function GastosFixos() {
             <div className="py-12 text-center text-slate-500">Carregando...</div>
           ) : gastos.filter(g => g.ativo).length === 0 ? (
             <div className="py-12 text-center">
-              <AlertCircle className="mx-auto mb-4 h-12 w-12 text-slate-300 dark:text-slate-600" />
               <p className="text-slate-500">Nenhuma despesa cadastrada</p>
             </div>
           ) : (
@@ -439,56 +442,54 @@ export default function GastosFixos() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {gastos
-                    .filter(g => g.ativo)
-                    .map(g => {
-                      const proximo = g.diaVencimento >= hoje && g.diaVencimento <= hoje + 7;
-                      return (
-                        <TableRow key={g.id}>
-                          <TableCell>
+                  {gastos.filter(g => g.ativo).map(g => {
+                    const proximo = g.diaVencimento >= hoje && g.diaVencimento <= hoje + 7;
+                    return (
+                      <TableRow key={g.id}>
+                        <TableCell>
+                          <Badge
+                            variant="secondary"
+                            className="flex w-fit items-center gap-1"
+                            style={{
+                              backgroundColor: `${getCategoriaColor(g.categoria)}20`,
+                              color: getCategoriaColor(g.categoria),
+                            }}
+                          >
+                            {getCategoriaIcon(g.categoria)}
+                            <span className="hidden sm:inline">
+                              {CATEGORIAS.find(c => c.value === g.categoria)?.label}
+                            </span>
+                          </Badge>
+                        </TableCell>
+                        <TableCell>{g.nome}</TableCell>
+                        <TableCell>R$ {money(g.valor)}</TableCell>
+                        <TableCell>Dia {g.diaVencimento}</TableCell>
+                        <TableCell>
+                          {proximo ? (
+                            <Badge className="bg-amber-500">Próximo</Badge>
+                          ) : (
                             <Badge
                               variant="secondary"
-                              className="flex w-fit items-center gap-1"
-                              style={{
-                                backgroundColor: `${getCategoriaColor(g.categoria)}20`,
-                                color: getCategoriaColor(g.categoria),
-                              }}
+                              className="bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
                             >
-                              {getCategoriaIcon(g.categoria)}
-                              <span className="hidden sm:inline">
-                                {CATEGORIAS.find(c => c.value === g.categoria)?.label}
-                              </span>
+                              Ativo
                             </Badge>
-                          </TableCell>
-                          <TableCell>{g.nome}</TableCell>
-                          <TableCell>R$ {money(g.valor)}</TableCell>
-                          <TableCell>Dia {g.diaVencimento}</TableCell>
-                          <TableCell>
-                            {proximo ? (
-                              <Badge className="bg-amber-500">Próximo</Badge>
-                            ) : (
-                              <Badge
-                                variant="secondary"
-                                className="bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-                              >
-                                Ativo
-                              </Badge>
-                            )}
-                          </TableCell>
-                          <TableCell className="text-right">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => removeGasto(g.id)}
-                              className="text-red-500 hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-950/30"
-                              aria-label="Remover gasto"
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })}
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => removeGasto(g.id)}
+                            className="text-red-500 hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-950/30"
+                            aria-label="Remover gasto"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
                 </TableBody>
               </Table>
             </div>

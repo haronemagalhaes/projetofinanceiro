@@ -13,10 +13,10 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area
 } from 'recharts';
 
-// Firebase
-import app from '@/lib/firebaseConfig';
+// Firebase centralizado + auth
+import { db } from '@/lib/firebaseClients';
+import { useAuth } from '@/hooks/useAuth';
 import {
-  getFirestore,
   collection,
   addDoc,
   onSnapshot,
@@ -25,16 +25,29 @@ import {
   serverTimestamp,
   doc,
   setDoc,
-  updateDoc,
 } from 'firebase/firestore';
+import type { Timestamp } from 'firebase/firestore';
 
+// ================== Tipagens ==================
 interface Transacao {
   id: string;
   tipo: 'deposito' | 'retirada';
   valor: number;
-  createdAt?: any; // Firestore Timestamp | undefined
+  createdAt?: Timestamp | Date | null;
   descricao: string;
 }
+
+type TransacaoDoc = {
+  tipo?: 'deposito' | 'retirada';
+  valor?: number;
+  createdAt?: Timestamp;
+  descricao?: string;
+};
+
+type ConfigDoc = {
+  metaMensal?: number;
+  updatedAt?: Timestamp;
+};
 
 type NovaTransacaoForm = {
   tipo: 'deposito' | 'retirada';
@@ -42,13 +55,11 @@ type NovaTransacaoForm = {
   descricao: string;
 };
 
-const db = getFirestore(app);
-const COL_TX = 'poupanca_transacoes';
-const CFG_COL = 'poupanca_config';
-const CFG_ID = 'main';
-
+// ================== Componente ==================
 export default function Poupanca() {
-  // ===== Estados =====
+  const { uid, loading: loadingUser } = useAuth();
+
+  // Estados
   const [metaMensal, setMetaMensal] = useState<number>(1000);
   const [transacoes, setTransacoes] = useState<Transacao[]>([]);
   const [novaTransacao, setNovaTransacao] = useState<NovaTransacaoForm>({
@@ -57,25 +68,30 @@ export default function Poupanca() {
     descricao: '',
   });
 
-  // ===== Listeners Firestore =====
+  // ------- Listeners Firestore -------
   useEffect(() => {
-    // meta
-    const cfgRef = doc(db, CFG_COL, CFG_ID);
+    if (!uid) return; // só depois de autenticar
+
+    // meta (users/{uid}/poupanca_config/main)
+    const cfgRef = doc(db, 'users', uid, 'poupanca_config', 'main');
     const unsubCfg = onSnapshot(cfgRef, (snap) => {
-      const d = snap.data();
+      const d = snap.data() as ConfigDoc | undefined;
       if (d?.metaMensal !== undefined) setMetaMensal(Number(d.metaMensal) || 0);
     });
 
-    // transações
-    const q = query(collection(db, COL_TX), orderBy('createdAt', 'asc'));
+    // transações (users/{uid}/poupanca_transacoes)
+    const q = query(
+      collection(db, 'users', uid, 'poupanca_transacoes'),
+      orderBy('createdAt', 'asc')
+    );
     const unsubTx = onSnapshot(q, (snap) => {
       const list: Transacao[] = snap.docs.map((d) => {
-        const x = d.data() as any;
+        const x = d.data() as TransacaoDoc;
         return {
           id: d.id,
-          tipo: x.tipo,
-          valor: Number(x.valor) || 0,
-          createdAt: x.createdAt,
+          tipo: (x.tipo ?? 'deposito'),
+          valor: Number(x.valor ?? 0),
+          createdAt: x.createdAt ?? null,
           descricao: String(x.descricao ?? ''),
         };
       });
@@ -86,20 +102,26 @@ export default function Poupanca() {
       unsubCfg();
       unsubTx();
     };
-  }, []);
+  }, [uid]);
 
-  // ===== Ações =====
+  // ------- Ações -------
   const salvarMeta = async (valor: number) => {
-    const cfgRef = doc(db, CFG_COL, CFG_ID);
-    // setDoc merge para criar se não existir
-    await setDoc(cfgRef, { metaMensal: valor, updatedAt: serverTimestamp() }, { merge: true });
+    if (!uid) return;
+    const cfgRef = doc(db, 'users', uid, 'poupanca_config', 'main');
+    await setDoc(
+      cfgRef,
+      { metaMensal: Number(valor) || 0, updatedAt: serverTimestamp() },
+      { merge: true }
+    );
   };
 
   const adicionarTransacao = async () => {
+    if (!uid) return;
     if (!novaTransacao.valor || !novaTransacao.descricao) return;
-    const valor = Math.max(0, parseFloat(novaTransacao.valor) || 0);
 
-    await addDoc(collection(db, COL_TX), {
+    const valor = Math.max(0, parseFloat(novaTransacao.valor.replace(',', '.')) || 0);
+
+    await addDoc(collection(db, 'users', uid, 'poupanca_transacoes'), {
       tipo: novaTransacao.tipo,
       valor,
       descricao: novaTransacao.descricao.trim(),
@@ -109,7 +131,7 @@ export default function Poupanca() {
     setNovaTransacao({ tipo: 'deposito', valor: '', descricao: '' });
   };
 
-  // ===== Cálculos =====
+  // ------- Cálculos -------
   const totalDepositado = useMemo(
     () => transacoes.filter(t => t.tipo === 'deposito').reduce((a, t) => a + t.valor, 0),
     [transacoes]
@@ -123,9 +145,8 @@ export default function Poupanca() {
   const progressoPercentual = metaMensal > 0 ? (economizado / metaMensal) * 100 : 0;
   const faltam = Math.max(0, metaMensal - economizado);
 
-  // Série para os últimos 5 meses com base em createdAt
+  // Série de evolução mensal (últimos 5 meses + atual)
   const dadosEvolucao = useMemo(() => {
-    // constrói os últimos 5 meses (mais o atual) no formato {label, yyyymm}
     const base = new Date();
     const buckets: { label: string; key: string; valor: number }[] = [];
     for (let i = 4; i >= 0; i--) {
@@ -135,17 +156,15 @@ export default function Poupanca() {
       buckets.push({ label, key, valor: 0 });
     }
 
-    // soma por mês (depósitos positivos, retiradas negativas)
     transacoes.forEach((t) => {
       const ts: Date =
-        t.createdAt?.toDate?.() ??
-        (typeof t.createdAt === 'string' ? new Date(t.createdAt) : new Date());
+        (t.createdAt as Timestamp)?.toDate?.() ??
+        (t.createdAt instanceof Date ? t.createdAt : new Date());
       const key = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, '0')}`;
       const idx = buckets.findIndex(b => b.key === key);
       if (idx >= 0) buckets[idx].valor += t.tipo === 'deposito' ? t.valor : -t.valor;
     });
 
-    // transforma em cumulativo (saldo)
     let acc = 0;
     return buckets.map((b) => {
       acc += b.valor;
@@ -153,6 +172,9 @@ export default function Poupanca() {
     });
   }, [transacoes]);
 
+  if (loadingUser) return null;
+
+  // ================== UI ==================
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-4">
@@ -304,13 +326,14 @@ export default function Poupanca() {
             </div>
             <Button
               onClick={adicionarTransacao}
-              className={`w-full ${
-                novaTransacao.tipo === 'deposito'
+              className={`w-full ${novaTransacao.tipo === 'deposito'
                   ? 'bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700'
                   : 'bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700'
-              }`}
+                }`}
             >
-              {novaTransacao.tipo === 'deposito' ? <Plus className="w-4 h-4 mr-2" /> : <MinusCircle className="w-4 h-4 mr-2" />}
+              {novaTransacao.tipo === 'deposito'
+                ? <Plus className="w-4 h-4 mr-2" />
+                : <MinusCircle className="w-4 h-4 mr-2" />}
               Registrar {novaTransacao.tipo === 'deposito' ? 'Depósito' : 'Retirada'}
             </Button>
 
@@ -338,16 +361,17 @@ export default function Poupanca() {
           <CardContent>
             <div className="space-y-3 max-h-[400px] overflow-y-auto">
               {transacoes.slice().reverse().map((t) => {
-                const dt = t.createdAt?.toDate?.() ?? new Date();
+                const dt: Date =
+                  (t.createdAt as Timestamp)?.toDate?.() ??
+                  (t.createdAt instanceof Date ? t.createdAt : new Date());
                 const dataBR = dt.toLocaleDateString('pt-BR');
                 return (
                   <div
                     key={t.id}
-                    className={`p-4 rounded-xl border ${
-                      t.tipo === 'deposito'
+                    className={`p-4 rounded-xl border ${t.tipo === 'deposito'
                         ? 'bg-gradient-to-r from-emerald-50 to-green-50 border-emerald-100'
                         : 'bg-gradient-to-r from-red-50 to-orange-50 border-red-100'
-                    }`}
+                      }`}
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">
@@ -400,7 +424,9 @@ export default function Poupanca() {
               <YAxis stroke="#64748b" />
               <Tooltip
                 contentStyle={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px' }}
-                formatter={(value) => `R$ ${Number(value).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`}
+                formatter={(value) =>
+                  `R$ ${Number(value).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`
+                }
               />
               <Area
                 type="monotone"
