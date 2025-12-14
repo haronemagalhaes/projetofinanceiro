@@ -6,7 +6,7 @@ import DashboardGeral from './Home/DashboardGeral';
 import RendaFixa from './Home/RendaFixa';
 import Poupanca from './Home/Poupanca';
 import Freelancer from './Home/Freelancer';
-import CartoesCredito from './Home/CartoesCredito';
+import CartoesCredito from './Home/Cartoes/CartoesCredito';
 import GastosFixos from './Home/GastosFixos';
 import { LayoutDashboard, Repeat, Wallet, CreditCard, Briefcase, PiggyBank, LogOut } from 'lucide-react';
 import { signOut } from 'firebase/auth';

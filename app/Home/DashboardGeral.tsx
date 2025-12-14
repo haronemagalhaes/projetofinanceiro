@@ -20,7 +20,6 @@ import {
 import { onAuthStateChanged } from 'firebase/auth';
 import { FirebaseError } from 'firebase/app';
 
-/* ---------------- Types ---------------- */
 type RendaFixa = { id: string; valor: number; createdAt?: unknown };
 type GastoFixo = { id: string; valor: number; ativo: boolean; createdAt?: unknown };
 type Cartao = { id: string; nome: string; cor: string; limite: number };
@@ -29,8 +28,6 @@ type Compra = {
   parcelas: number; parcelaAtual: number; dataISO: string; createdAt?: unknown
 };
 type PoupTx = { id: string; tipo: 'deposito' | 'retirada'; valor: number; createdAt?: unknown };
-
-/* ---------------- Utils sem any ---------------- */
 const getNum = (v: unknown, fallback = 0): number => (typeof v === 'number' ? v : Number(v)) || fallback;
 const getStr = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : String(v ?? fallback));
 const getBool = (v: unknown, fallback = false): boolean => (typeof v === 'boolean' ? v : Boolean(v ?? fallback));
@@ -49,8 +46,6 @@ export default function DashboardGeral() {
   const [cartoes, setCartoes] = useState<Cartao[]>([]);
   const [compras, setCompras] = useState<Compra[]>([]);
   const [poupTx, setPoupTx] = useState<PoupTx[]>([]);
-
-  /* ---------------- Auth ---------------- */
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
       try {
@@ -71,7 +66,7 @@ export default function DashboardGeral() {
     return () => unsub();
   }, []);
 
-  /* ---------------- Listeners (multiusuário em users/{uid}/...) ---------------- */
+  
   useEffect(() => {
     if (!authReady || !uid || authError) return;
 
